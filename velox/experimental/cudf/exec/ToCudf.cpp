@@ -443,6 +443,10 @@ void CudfConfig::initialize(
   if (config.find(kCudfExchangeLogLevel) != config.end()) {
     exchangeLogLevel = folly::to<int32_t>(config[kCudfExchangeLogLevel]);
   }
+  if (config.find(kCudfEnableEnforceSingleRow) != config.end()) {
+    enableEnforceSingleRow =
+        folly::to<bool>(config[kCudfEnableEnforceSingleRow]);
+  }
 }
 
 } // namespace facebook::velox::cudf_velox

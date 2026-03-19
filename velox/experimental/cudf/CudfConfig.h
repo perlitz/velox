@@ -60,6 +60,8 @@ struct CudfConfig {
   static constexpr const char* kUcxxBlockingPolling{"ucxx.blocking_polling"};
   static constexpr const char* kCudfExchangeLogLevel{
       "cudf.exchange_log_level"};
+  static constexpr const char* kCudfEnableEnforceSingleRow{
+      "cudf.enable_enforce_single_row"};
 
   /// Singleton CudfConfig instance.
   /// Clients must set the configs below before invoking registerCudf().
@@ -154,6 +156,10 @@ struct CudfConfig {
   /// VLOG level for cudf-exchange source files (0 = silent, 1-3 = increasing
   /// verbosity). Applied via google::SetVLOGLevel when Communicator starts.
   int32_t exchangeLogLevel{0};
+
+  /// Enable GPU acceleration for EnforceSingleRow operator.
+  /// Set to false to measure performance impact by forcing CPU fallback.
+  bool enableEnforceSingleRow{true};
 };
 
 } // namespace facebook::velox::cudf_velox
