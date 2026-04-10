@@ -1,0 +1,659 @@
+#!/usr/bin/env python3
+# Copyright (c) Facebook, Inc. and its affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Generate synthetic Velox query plans exercising NestedLoopJoin.
+
+Produces Q1.json ... Q6.json that can be fed directly to the TPC-DS benchmark
+via --plan_path, using real TPC-DS parquet tables as data sources.
+
+Usage:
+    python3 generate_nlj_plans.py --output_dir=/velox/VeloxPlans/synthetic/nlj
+"""
+
+import argparse
+import json
+import os
+
+
+# ---------------------------------------------------------------------------
+# Node ID allocator — reset per query
+# ---------------------------------------------------------------------------
+
+_next_id = 0
+
+
+def reset_ids():
+    global _next_id
+    _next_id = 0
+
+
+def next_id():
+    global _next_id
+    _next_id += 1
+    return str(_next_id)
+
+
+# ---------------------------------------------------------------------------
+# Type helpers
+# ---------------------------------------------------------------------------
+
+
+def make_type(velox_type):
+    """Velox scalar type: INTEGER, BIGINT, DOUBLE, VARCHAR, BOOLEAN."""
+    return {"name": "Type", "type": velox_type}
+
+
+def make_row_type(names, types):
+    """ROW(...) type used in outputType fields."""
+    return {
+        "cTypes": [make_type(t) for t in types],
+        "name": "Type",
+        "names": list(names),
+        "type": "ROW",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Expression helpers (ITypedExpr serialization)
+# ---------------------------------------------------------------------------
+
+
+def make_field_access(field_name, velox_type):
+    """FieldAccessTypedExpr — references a column by name."""
+    return {
+        "fieldName": field_name,
+        "name": "FieldAccessTypedExpr",
+        "type": make_type(velox_type),
+    }
+
+
+def make_constant(value, velox_type):
+    """ConstantTypedExpr — a literal value."""
+    return {
+        "name": "ConstantTypedExpr",
+        "type": make_type(velox_type),
+        "value": {"type": velox_type, "value": value},
+    }
+
+
+def make_call(func_name, inputs, return_type):
+    """CallTypedExpr — a function call with presto.default. prefix."""
+    return {
+        "functionName": f"presto.default.{func_name}",
+        "inputs": inputs,
+        "name": "CallTypedExpr",
+        "type": make_type(return_type),
+    }
+
+
+def make_and(left, right):
+    """AND two boolean expressions."""
+    return make_call("and", [left, right], "BOOLEAN")
+
+
+def make_between(value, low, high):
+    """BETWEEN expression: value >= low AND value <= high."""
+    return {
+        "functionName": "presto.default.between",
+        "inputs": [value, low, high],
+        "name": "CallTypedExpr",
+        "type": make_type("BOOLEAN"),
+    }
+
+
+def make_cast(input_expr, target_type):
+    """CAST expression."""
+    return {
+        "functionName": "presto.default.cast",
+        "inputs": [input_expr],
+        "name": "CastTypedExpr",
+        "nullOnFailure": False,
+        "type": make_type(target_type),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Plan node helpers
+# ---------------------------------------------------------------------------
+
+
+def make_column_handle(col_name, velox_type):
+    """HiveColumnHandle for a regular column."""
+    return {
+        "columnType": "Regular",
+        "dataType": make_type(velox_type),
+        "hiveColumnHandleName": col_name,
+        "hiveType": make_type(velox_type),
+        "name": "HiveColumnHandle",
+        "requiredSubfields": [],
+    }
+
+
+def make_table_scan(table_name, columns, num_rows=0):
+    """TableScanNode reading specified columns from a TPC-DS table.
+
+    Args:
+        table_name: e.g. "store_sales" (will be prefixed with tpcds_sf100.)
+        columns: list of (alias, hive_col_name, velox_type) tuples
+        num_rows: approximate row count for tableParameters
+    """
+    node_id = next_id()
+    full_table_name = f"tpcds_sf100.{table_name}"
+
+    assignments = []
+    output_names = []
+    output_types = []
+    data_col_names = []
+    data_col_types = []
+
+    for alias, hive_name, vtype in columns:
+        assignments.append(
+            {"assign": alias, "columnHandle": make_column_handle(hive_name, vtype)}
+        )
+        output_names.append(alias)
+        output_types.append(vtype)
+        if hive_name not in data_col_names:
+            data_col_names.append(hive_name)
+            data_col_types.append(vtype)
+
+    return {
+        "assignments": assignments,
+        "id": node_id,
+        "name": "TableScanNode",
+        "outputType": make_row_type(output_names, output_types),
+        "tableHandle": {
+            "connectorId": "hive",
+            "dataColumns": make_row_type(data_col_names, data_col_types),
+            "filterPushdownEnabled": False,
+            "name": "HiveTableHandle",
+            "subfieldFilters": [],
+            "tableName": full_table_name,
+            "tableParameters": {
+                "EXTERNAL": "TRUE",
+                "numFiles": "0",
+                "numRows": str(num_rows),
+                "totalSize": "0",
+            },
+        },
+    }
+
+
+def make_filter(source, condition):
+    """FilterNode wrapping a source with a boolean condition."""
+    node_id = next_id()
+    return {
+        "filter": condition,
+        "id": node_id,
+        "name": "FilterNode",
+        "outputType": source["outputType"],
+        "sources": [source],
+    }
+
+
+def make_local_partition_gather(source):
+    """LocalPartitionNode (Gather) wrapping the build side."""
+    outer_id = next_id()
+    inner_id = f"{outer_id}.0"
+
+    # The inner source is a ProjectNode that passes through all columns.
+    out_type = source["outputType"]
+    names = out_type["names"]
+    types = [ct["type"] for ct in out_type["cTypes"]]
+
+    projections = [make_field_access(n, t) for n, t in zip(names, types)]
+
+    project = {
+        "id": inner_id,
+        "name": "ProjectNode",
+        "names": list(names),
+        "projections": projections,
+        "sources": [source],
+    }
+
+    return {
+        "id": outer_id,
+        "name": "LocalPartitionNode",
+        "partitionFunctionSpec": {"name": "GatherPartitionFunctionSpec"},
+        "scaleWriter": False,
+        "sources": [project],
+    }
+
+
+def make_nlj(join_condition, probe, build, output_columns):
+    """NestedLoopJoinNode (INNER).
+
+    Args:
+        join_condition: expression dict or None for cross join
+        probe: source[0] plan node
+        build: source[1] plan node (will be wrapped in LocalPartitionNode)
+        output_columns: list of (name, velox_type) for the output
+    """
+    node_id = next_id()
+    names = [c[0] for c in output_columns]
+    types = [c[1] for c in output_columns]
+
+    build_wrapped = make_local_partition_gather(build)
+
+    node = {
+        "id": node_id,
+        "joinType": "INNER",
+        "name": "NestedLoopJoinNode",
+        "outputType": make_row_type(names, types),
+        "sources": [probe, build_wrapped],
+    }
+    if join_condition is not None:
+        node["joinCondition"] = join_condition
+    return node
+
+
+def make_partitioned_output(source):
+    """PartitionedOutputNode — top-level plan wrapper."""
+    node_id = next_id()
+    return {
+        "id": node_id,
+        "keys": [],
+        "kind": "PARTITIONED",
+        "name": "PartitionedOutputNode",
+        "numPartitions": 1,
+        "outputType": source["outputType"],
+        "partitionFunctionSpec": {"name": "GatherPartitionFunctionSpec"},
+        "replicateNullsAndAny": False,
+        "serdeKind": "Presto",
+        "sources": [source],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Query definitions
+# ---------------------------------------------------------------------------
+
+
+def query_1():
+    """Range join: store_sales x item on price range.
+
+    ss_list_price BETWEEN (i_current_price - 1.0) AND (i_current_price + 1.0)
+    """
+    probe = make_table_scan(
+        "store_sales",
+        [
+            ("ss_item_sk", "ss_item_sk", "INTEGER"),
+            ("ss_list_price", "ss_list_price", "DOUBLE"),
+            ("ss_sales_price", "ss_sales_price", "DOUBLE"),
+        ],
+        num_rows=2880404,
+    )
+    build = make_table_scan(
+        "item",
+        [
+            ("i_item_sk", "i_item_sk", "INTEGER"),
+            ("i_current_price", "i_current_price", "DOUBLE"),
+            ("i_item_desc", "i_item_desc", "VARCHAR"),
+        ],
+        num_rows=18000,
+    )
+
+    condition = make_between(
+        make_field_access("ss_list_price", "DOUBLE"),
+        make_call(
+            "minus",
+            [
+                make_field_access("i_current_price", "DOUBLE"),
+                make_constant(1.0, "DOUBLE"),
+            ],
+            "DOUBLE",
+        ),
+        make_call(
+            "plus",
+            [
+                make_field_access("i_current_price", "DOUBLE"),
+                make_constant(1.0, "DOUBLE"),
+            ],
+            "DOUBLE",
+        ),
+    )
+
+    output_columns = [
+        ("ss_item_sk", "INTEGER"),
+        ("ss_list_price", "DOUBLE"),
+        ("ss_sales_price", "DOUBLE"),
+        ("i_item_sk", "INTEGER"),
+        ("i_current_price", "DOUBLE"),
+    ]
+
+    nlj = make_nlj(condition, probe, build, output_columns)
+    return make_partitioned_output(nlj)
+
+
+def query_2():
+    """Inequality join with filtered build: store_sales x date_dim.
+
+    Build side filtered to a single year (d_year = 2000), producing ~365 rows.
+    Condition: ss_sold_date_sk > d_date_sk
+    """
+    probe = make_table_scan(
+        "store_sales",
+        [
+            ("ss_sold_date_sk", "ss_sold_date_sk", "INTEGER"),
+            ("ss_ext_sales_price", "ss_ext_sales_price", "DOUBLE"),
+        ],
+        num_rows=2880404,
+    )
+    build_scan = make_table_scan(
+        "date_dim",
+        [
+            ("d_date_sk", "d_date_sk", "INTEGER"),
+            ("d_year", "d_year", "INTEGER"),
+        ],
+        num_rows=73049,
+    )
+    build = make_filter(
+        build_scan,
+        make_call(
+            "eq",
+            [make_field_access("d_year", "INTEGER"), make_constant(2000, "INTEGER")],
+            "BOOLEAN",
+        ),
+    )
+
+    condition = make_call(
+        "gt",
+        [
+            make_field_access("ss_sold_date_sk", "INTEGER"),
+            make_field_access("d_date_sk", "INTEGER"),
+        ],
+        "BOOLEAN",
+    )
+
+    output_columns = [
+        ("ss_sold_date_sk", "INTEGER"),
+        ("ss_ext_sales_price", "DOUBLE"),
+        ("d_date_sk", "INTEGER"),
+        ("d_year", "INTEGER"),
+    ]
+
+    nlj = make_nlj(condition, probe, build, output_columns)
+    return make_partitioned_output(nlj)
+
+
+def query_3():
+    """Multi-condition join: catalog_sales x item.
+
+    cs_list_price > i_current_price AND cs_wholesale_cost < i_wholesale_cost
+    """
+    probe = make_table_scan(
+        "catalog_sales",
+        [
+            ("cs_item_sk", "cs_item_sk", "INTEGER"),
+            ("cs_list_price", "cs_list_price", "DOUBLE"),
+            ("cs_wholesale_cost", "cs_wholesale_cost", "DOUBLE"),
+        ],
+        num_rows=1441548,
+    )
+    build = make_table_scan(
+        "item",
+        [
+            ("i_item_sk", "i_item_sk", "INTEGER"),
+            ("i_current_price", "i_current_price", "DOUBLE"),
+            ("i_wholesale_cost", "i_wholesale_cost", "DOUBLE"),
+        ],
+        num_rows=18000,
+    )
+
+    condition = make_and(
+        make_call(
+            "gt",
+            [
+                make_field_access("cs_list_price", "DOUBLE"),
+                make_field_access("i_current_price", "DOUBLE"),
+            ],
+            "BOOLEAN",
+        ),
+        make_call(
+            "lt",
+            [
+                make_field_access("cs_wholesale_cost", "DOUBLE"),
+                make_field_access("i_wholesale_cost", "DOUBLE"),
+            ],
+            "BOOLEAN",
+        ),
+    )
+
+    output_columns = [
+        ("cs_item_sk", "INTEGER"),
+        ("cs_list_price", "DOUBLE"),
+        ("cs_wholesale_cost", "DOUBLE"),
+        ("i_item_sk", "INTEGER"),
+        ("i_current_price", "DOUBLE"),
+        ("i_wholesale_cost", "DOUBLE"),
+    ]
+
+    nlj = make_nlj(condition, probe, build, output_columns)
+    return make_partitioned_output(nlj)
+
+
+def query_4():
+    """Small x small baseline: store x item.
+
+    Simple condition: i_current_price > 50.0
+    store has 12 rows, item has 18K — cross product is only 216K, filtered ~108K.
+    """
+    probe = make_table_scan(
+        "store",
+        [
+            ("s_store_sk", "s_store_sk", "INTEGER"),
+            ("s_store_name", "s_store_name", "VARCHAR"),
+            ("s_number_employees", "s_number_employees", "INTEGER"),
+        ],
+        num_rows=12,
+    )
+    build = make_table_scan(
+        "item",
+        [
+            ("i_item_sk", "i_item_sk", "INTEGER"),
+            ("i_current_price", "i_current_price", "DOUBLE"),
+        ],
+        num_rows=18000,
+    )
+
+    condition = make_call(
+        "gt",
+        [
+            make_field_access("i_current_price", "DOUBLE"),
+            make_constant(50.0, "DOUBLE"),
+        ],
+        "BOOLEAN",
+    )
+
+    output_columns = [
+        ("s_store_sk", "INTEGER"),
+        ("s_store_name", "VARCHAR"),
+        ("i_item_sk", "INTEGER"),
+        ("i_current_price", "DOUBLE"),
+    ]
+
+    nlj = make_nlj(condition, probe, build, output_columns)
+    return make_partitioned_output(nlj)
+
+
+def query_5():
+    """Medium cross-product: customer x customer_address with birth year filter.
+
+    Probe filtered to c_birth_year > 1970 (~30K rows from 100K).
+    Build is all customer_address (50K rows).
+    Condition: c_current_addr_sk > ca_address_sk (inequality to avoid hash join).
+    Output: ~hundreds of millions after cross-product with condition.
+    """
+    probe_scan = make_table_scan(
+        "customer",
+        [
+            ("c_customer_sk", "c_customer_sk", "INTEGER"),
+            ("c_birth_year", "c_birth_year", "INTEGER"),
+            ("c_current_addr_sk", "c_current_addr_sk", "INTEGER"),
+        ],
+        num_rows=100000,
+    )
+    probe = make_filter(
+        probe_scan,
+        make_call(
+            "gt",
+            [
+                make_field_access("c_birth_year", "INTEGER"),
+                make_constant(1970, "INTEGER"),
+            ],
+            "BOOLEAN",
+        ),
+    )
+
+    build = make_table_scan(
+        "customer_address",
+        [
+            ("ca_address_sk", "ca_address_sk", "INTEGER"),
+            ("ca_state", "ca_state", "VARCHAR"),
+        ],
+        num_rows=50000,
+    )
+
+    condition = make_call(
+        "gt",
+        [
+            make_field_access("c_current_addr_sk", "INTEGER"),
+            make_field_access("ca_address_sk", "INTEGER"),
+        ],
+        "BOOLEAN",
+    )
+
+    output_columns = [
+        ("c_customer_sk", "INTEGER"),
+        ("c_current_addr_sk", "INTEGER"),
+        ("ca_address_sk", "INTEGER"),
+        ("ca_state", "VARCHAR"),
+    ]
+
+    nlj = make_nlj(condition, probe, build, output_columns)
+    return make_partitioned_output(nlj)
+
+
+def query_6():
+    """Fact-to-fact theta join: web_sales x store_sales (filtered).
+
+    Build: store_sales filtered to ss_store_sk = 1 (~30K rows at SF1).
+    Condition: ws_ext_sales_price > ss_ext_sales_price
+    """
+    probe = make_table_scan(
+        "web_sales",
+        [
+            ("ws_item_sk", "ws_item_sk", "INTEGER"),
+            ("ws_ext_sales_price", "ws_ext_sales_price", "DOUBLE"),
+        ],
+        num_rows=719384,
+    )
+    build_scan = make_table_scan(
+        "store_sales",
+        [
+            ("ss_item_sk", "ss_item_sk", "INTEGER"),
+            ("ss_store_sk", "ss_store_sk", "INTEGER"),
+            ("ss_ext_sales_price", "ss_ext_sales_price", "DOUBLE"),
+        ],
+        num_rows=2880404,
+    )
+    build = make_filter(
+        build_scan,
+        make_call(
+            "eq",
+            [
+                make_field_access("ss_store_sk", "INTEGER"),
+                make_constant(1, "INTEGER"),
+            ],
+            "BOOLEAN",
+        ),
+    )
+
+    condition = make_call(
+        "gt",
+        [
+            make_field_access("ws_ext_sales_price", "DOUBLE"),
+            make_field_access("ss_ext_sales_price", "DOUBLE"),
+        ],
+        "BOOLEAN",
+    )
+
+    output_columns = [
+        ("ws_item_sk", "INTEGER"),
+        ("ws_ext_sales_price", "DOUBLE"),
+        ("ss_item_sk", "INTEGER"),
+        ("ss_ext_sales_price", "DOUBLE"),
+    ]
+
+    nlj = make_nlj(condition, probe, build, output_columns)
+    return make_partitioned_output(nlj)
+
+
+# ---------------------------------------------------------------------------
+# Query registry
+# ---------------------------------------------------------------------------
+
+QUERIES = {
+    1: ("Range join: store_sales x item on price band", query_1),
+    2: ("Inequality + filtered build: store_sales x date_dim", query_2),
+    3: ("Multi-condition: catalog_sales x item", query_3),
+    4: ("Small baseline: store x item", query_4),
+    5: ("Medium cross-product: customer x customer_address", query_5),
+    6: ("Fact-to-fact theta: web_sales x store_sales(filtered)", query_6),
+}
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate synthetic Velox NLJ query plans for benchmarking."
+    )
+    parser.add_argument(
+        "--output_dir",
+        default="VeloxPlans/synthetic/nlj",
+        help="Directory to write Q*.json files",
+    )
+    parser.add_argument(
+        "--queries",
+        default=",".join(str(q) for q in sorted(QUERIES)),
+        help="Comma-separated query IDs to generate (default: all)",
+    )
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    query_ids = [int(q.strip()) for q in args.queries.split(",")]
+    for qid in query_ids:
+        if qid not in QUERIES:
+            print(f"WARNING: Unknown query ID {qid}, skipping")
+            continue
+
+        desc, gen_func = QUERIES[qid]
+        reset_ids()
+        plan = gen_func()
+
+        path = os.path.join(args.output_dir, f"Q{qid}.json")
+        with open(path, "w") as f:
+            json.dump(plan, f, indent=2)
+        print(f"Q{qid}: {desc} -> {path}")
+
+    print(f"\nGenerated {len(query_ids)} plan(s) in {args.output_dir}")
+
+
+if __name__ == "__main__":
+    main()
