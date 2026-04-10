@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <gflags/gflags.h>
+
 #include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/connectors/hive/CudfHiveConnector.h"
 #include "velox/experimental/cudf/exec/CudfAssignUniqueId.h"
@@ -48,6 +50,11 @@
 #include "velox/exec/Task.h"
 #include "velox/exec/TopN.h"
 #include "velox/exec/Values.h"
+
+DEFINE_bool(
+    cudf_enable_nested_loop_join,
+    true,
+    "Enable CuDF GPU NestedLoopJoin. When false, falls back to CPU.");
 
 namespace facebook::velox::cudf_velox {
 
@@ -426,6 +433,10 @@ class CudfNestedLoopJoinBaseAdapter : public OperatorAdapter {
       const core::PlanNodePtr& planNode,
       exec::DriverCtx* ctx) const override {
     if (!canHandle(op)) {
+      return false;
+    }
+
+    if (!FLAGS_cudf_enable_nested_loop_join) {
       return false;
     }
 
