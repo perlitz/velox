@@ -295,6 +295,89 @@ TABLE_SCHEMAS = {
         ("ws_net_paid_inc_ship_tax", "DOUBLE"),
         ("ws_net_profit", "DOUBLE"),
     ],
+    "promotion": [
+        ("p_promo_sk", "INTEGER"),
+        ("p_promo_id", "VARCHAR"),
+        ("p_start_date_sk", "INTEGER"),
+        ("p_end_date_sk", "INTEGER"),
+        ("p_item_sk", "INTEGER"),
+        ("p_cost", "DOUBLE"),
+        ("p_response_target", "INTEGER"),
+        ("p_promo_name", "VARCHAR"),
+        ("p_channel_dmail", "VARCHAR"),
+        ("p_channel_email", "VARCHAR"),
+        ("p_channel_catalog", "VARCHAR"),
+        ("p_channel_tv", "VARCHAR"),
+        ("p_channel_radio", "VARCHAR"),
+        ("p_channel_press", "VARCHAR"),
+        ("p_channel_event", "VARCHAR"),
+        ("p_channel_demo", "VARCHAR"),
+        ("p_channel_details", "VARCHAR"),
+        ("p_purpose", "VARCHAR"),
+        ("p_discount_active", "VARCHAR"),
+    ],
+    "warehouse": [
+        ("w_warehouse_sk", "INTEGER"),
+        ("w_warehouse_id", "VARCHAR"),
+        ("w_warehouse_name", "VARCHAR"),
+        ("w_warehouse_sq_ft", "INTEGER"),
+        ("w_street_number", "VARCHAR"),
+        ("w_street_name", "VARCHAR"),
+        ("w_street_type", "VARCHAR"),
+        ("w_suite_number", "VARCHAR"),
+        ("w_city", "VARCHAR"),
+        ("w_county", "VARCHAR"),
+        ("w_state", "VARCHAR"),
+        ("w_zip", "VARCHAR"),
+        ("w_country", "VARCHAR"),
+        ("w_gmt_offset", "DOUBLE"),
+    ],
+    "web_page": [
+        ("wp_web_page_sk", "INTEGER"),
+        ("wp_web_page_id", "VARCHAR"),
+        ("wp_rec_start_date", "DATE"),
+        ("wp_rec_end_date", "DATE"),
+        ("wp_creation_date_sk", "INTEGER"),
+        ("wp_access_date_sk", "INTEGER"),
+        ("wp_autogen_flag", "VARCHAR"),
+        ("wp_customer_sk", "INTEGER"),
+        ("wp_url", "VARCHAR"),
+        ("wp_type", "VARCHAR"),
+        ("wp_char_count", "INTEGER"),
+        ("wp_link_count", "INTEGER"),
+        ("wp_image_count", "INTEGER"),
+        ("wp_max_ad_count", "INTEGER"),
+    ],
+    "catalog_page": [
+        ("cp_catalog_page_sk", "INTEGER"),
+        ("cp_catalog_page_id", "VARCHAR"),
+        ("cp_start_date_sk", "INTEGER"),
+        ("cp_end_date_sk", "INTEGER"),
+        ("cp_department", "VARCHAR"),
+        ("cp_catalog_number", "INTEGER"),
+        ("cp_catalog_page_number", "INTEGER"),
+        ("cp_description", "VARCHAR"),
+        ("cp_type", "VARCHAR"),
+    ],
+    "time_dim": [
+        ("t_time_sk", "INTEGER"),
+        ("t_time_id", "VARCHAR"),
+        ("t_time", "INTEGER"),
+        ("t_hour", "INTEGER"),
+        ("t_minute", "INTEGER"),
+        ("t_second", "INTEGER"),
+        ("t_am_pm", "VARCHAR"),
+        ("t_shift", "VARCHAR"),
+        ("t_sub_shift", "VARCHAR"),
+        ("t_meal_time", "VARCHAR"),
+    ],
+    "household_demographics": [
+        ("hd_demo_sk", "INTEGER"),
+        ("hd_income_band_sk", "INTEGER"),
+        ("hd_buy_potential", "VARCHAR"),
+        ("hd_dep_count", "INTEGER"),
+        ("hd_vehicle_count", "INTEGER"),
+    ],
 }
 
 
@@ -843,6 +926,245 @@ def query_6():
     return make_partitioned_output(nlj)
 
 
+def query_7():
+    """SF100-safe: store x promotion on date range overlap.
+
+    Probe: store (402 at SF100), Build: promotion (1K at SF100).
+    Cross-product: ~402K pairs. Tests BETWEEN with arithmetic on both sides.
+    Condition: p_start_date_sk BETWEEN (s_closed_date_sk - 100) AND
+               (s_closed_date_sk + 100)
+    """
+    probe = make_table_scan(
+        "store",
+        [
+            ("s_store_sk", "s_store_sk", "INTEGER"),
+            ("s_store_name", "s_store_name", "VARCHAR"),
+            ("s_closed_date_sk", "s_closed_date_sk", "INTEGER"),
+        ],
+        num_rows=402,
+    )
+    build = make_table_scan(
+        "promotion",
+        [
+            ("p_promo_sk", "p_promo_sk", "INTEGER"),
+            ("p_promo_name", "p_promo_name", "VARCHAR"),
+            ("p_start_date_sk", "p_start_date_sk", "INTEGER"),
+            ("p_cost", "p_cost", "DOUBLE"),
+        ],
+        num_rows=1000,
+    )
+
+    condition = make_between(
+        make_field_access("p_start_date_sk", "INTEGER"),
+        make_call(
+            "minus",
+            [
+                make_field_access("s_closed_date_sk", "INTEGER"),
+                make_constant(100, "INTEGER"),
+            ],
+            "INTEGER",
+        ),
+        make_call(
+            "plus",
+            [
+                make_field_access("s_closed_date_sk", "INTEGER"),
+                make_constant(100, "INTEGER"),
+            ],
+            "INTEGER",
+        ),
+    )
+
+    output_columns = [
+        ("s_store_sk", "INTEGER"),
+        ("s_store_name", "VARCHAR"),
+        ("p_promo_sk", "INTEGER"),
+        ("p_promo_name", "VARCHAR"),
+        ("p_cost", "DOUBLE"),
+    ]
+
+    nlj = make_nlj(condition, probe, build, output_columns)
+    return make_partitioned_output(nlj)
+
+
+def query_8():
+    """SF100-safe: date_dim (1 year) x store with inequality.
+
+    Probe: date_dim filtered to d_year=2000 (~365 rows).
+    Build: store (402 at SF100).
+    Cross-product: ~147K pairs. Tests filtered probe + simple inequality.
+    Condition: d_date_sk > s_store_sk
+    """
+    probe_scan = make_table_scan(
+        "date_dim",
+        [
+            ("d_date_sk", "d_date_sk", "INTEGER"),
+            ("d_year", "d_year", "INTEGER"),
+            ("d_day_name", "d_day_name", "VARCHAR"),
+        ],
+        num_rows=73049,
+    )
+    probe = make_filter(
+        probe_scan,
+        make_call(
+            "eq",
+            [make_field_access("d_year", "INTEGER"), make_constant(2000, "INTEGER")],
+            "BOOLEAN",
+        ),
+    )
+    build = make_table_scan(
+        "store",
+        [
+            ("s_store_sk", "s_store_sk", "INTEGER"),
+            ("s_store_name", "s_store_name", "VARCHAR"),
+            ("s_tax_percentage", "s_tax_percentage", "DOUBLE"),
+        ],
+        num_rows=402,
+    )
+
+    condition = make_call(
+        "gt",
+        [
+            make_field_access("d_date_sk", "INTEGER"),
+            make_field_access("s_store_sk", "INTEGER"),
+        ],
+        "BOOLEAN",
+    )
+
+    output_columns = [
+        ("d_date_sk", "INTEGER"),
+        ("d_day_name", "VARCHAR"),
+        ("s_store_sk", "INTEGER"),
+        ("s_store_name", "VARCHAR"),
+    ]
+
+    nlj = make_nlj(condition, probe, build, output_columns)
+    return make_partitioned_output(nlj)
+
+
+def query_9():
+    """SF100-safe: web_page x catalog_page with multi-condition AND.
+
+    Probe: web_page (2K at SF100). Build: catalog_page (20K at SF100).
+    Cross-product: ~40M pairs. Tests AND of two inequalities on dimension
+    tables. This is the largest SF100-safe query.
+    Condition: wp_web_page_sk > cp_catalog_page_sk AND
+               wp_char_count > cp_catalog_page_number
+    """
+    probe = make_table_scan(
+        "web_page",
+        [
+            ("wp_web_page_sk", "wp_web_page_sk", "INTEGER"),
+            ("wp_char_count", "wp_char_count", "INTEGER"),
+            ("wp_link_count", "wp_link_count", "INTEGER"),
+        ],
+        num_rows=2040,
+    )
+    build = make_table_scan(
+        "catalog_page",
+        [
+            ("cp_catalog_page_sk", "cp_catalog_page_sk", "INTEGER"),
+            ("cp_catalog_page_number", "cp_catalog_page_number", "INTEGER"),
+            ("cp_catalog_number", "cp_catalog_number", "INTEGER"),
+        ],
+        num_rows=20400,
+    )
+
+    condition = make_and(
+        make_call(
+            "gt",
+            [
+                make_field_access("wp_web_page_sk", "INTEGER"),
+                make_field_access("cp_catalog_page_sk", "INTEGER"),
+            ],
+            "BOOLEAN",
+        ),
+        make_call(
+            "gt",
+            [
+                make_field_access("wp_char_count", "INTEGER"),
+                make_field_access("cp_catalog_page_number", "INTEGER"),
+            ],
+            "BOOLEAN",
+        ),
+    )
+
+    output_columns = [
+        ("wp_web_page_sk", "INTEGER"),
+        ("wp_char_count", "INTEGER"),
+        ("cp_catalog_page_sk", "INTEGER"),
+        ("cp_catalog_page_number", "INTEGER"),
+    ]
+
+    nlj = make_nlj(condition, probe, build, output_columns)
+    return make_partitioned_output(nlj)
+
+
+def query_10():
+    """SF100-safe: item (filtered) x household_demographics.
+
+    Probe: item filtered to i_category_id=1 (~15K rows at SF100).
+    Build: household_demographics (7.2K at SF100).
+    Cross-product: ~108M pairs. Tests filtered probe + BETWEEN on doubles.
+    Condition: i_current_price BETWEEN 10.0 AND 50.0 (always evaluated per pair)
+    AND hd_dep_count > 0
+    """
+    probe_scan = make_table_scan(
+        "item",
+        [
+            ("i_item_sk", "i_item_sk", "INTEGER"),
+            ("i_current_price", "i_current_price", "DOUBLE"),
+            ("i_category_id", "i_category_id", "INTEGER"),
+        ],
+        num_rows=204000,
+    )
+    probe = make_filter(
+        probe_scan,
+        make_call(
+            "eq",
+            [
+                make_field_access("i_category_id", "INTEGER"),
+                make_constant(1, "INTEGER"),
+            ],
+            "BOOLEAN",
+        ),
+    )
+    build = make_table_scan(
+        "household_demographics",
+        [
+            ("hd_demo_sk", "hd_demo_sk", "INTEGER"),
+            ("hd_dep_count", "hd_dep_count", "INTEGER"),
+            ("hd_vehicle_count", "hd_vehicle_count", "INTEGER"),
+        ],
+        num_rows=7200,
+    )
+
+    condition = make_and(
+        make_between(
+            make_field_access("i_current_price", "DOUBLE"),
+            make_constant(10.0, "DOUBLE"),
+            make_constant(50.0, "DOUBLE"),
+        ),
+        make_call(
+            "gt",
+            [
+                make_field_access("hd_dep_count", "INTEGER"),
+                make_constant(0, "INTEGER"),
+            ],
+            "BOOLEAN",
+        ),
+    )
+
+    output_columns = [
+        ("i_item_sk", "INTEGER"),
+        ("i_current_price", "DOUBLE"),
+        ("hd_demo_sk", "INTEGER"),
+        ("hd_dep_count", "INTEGER"),
+    ]
+
+    nlj = make_nlj(condition, probe, build, output_columns)
+    return make_partitioned_output(nlj)
+
+
 # ---------------------------------------------------------------------------
 # Query registry
 # ---------------------------------------------------------------------------
@@ -854,6 +1176,10 @@ QUERIES = {
     4: ("Small baseline: store x item", query_4),
     5: ("Medium cross-product: customer x customer_address", query_5),
     6: ("Fact-to-fact theta: web_sales x store_sales(filtered)", query_6),
+    7: ("SF100-safe: store x promotion date range", query_7),
+    8: ("SF100-safe: date_dim(filtered) x store inequality", query_8),
+    9: ("SF100-safe: web_page x catalog_page multi-condition", query_9),
+    10: ("SF100-safe: item(filtered) x household_demographics", query_10),
 }
 
 
