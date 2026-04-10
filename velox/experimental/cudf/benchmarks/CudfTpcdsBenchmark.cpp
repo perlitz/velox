@@ -22,6 +22,7 @@
 #include "velox/experimental/cudf/exec/ToCudf.h"
 #include "velox/experimental/cudf/tests/utils/CudfTpcdsQueryBuilder.h"
 
+#include "velox/connectors/ConnectorRegistry.h"
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/exec/tests/utils/HiveConnectorTestBase.h"
 
@@ -89,8 +90,8 @@ void CudfTpcdsBenchmark::initialize() {
     // CudfTpcdsQueryBuilder can register CudfHiveConnector under the plan's
     // connector ID instead. The query builder handles this when getQueryPlan()
     // is called.
-    if (connector::hasConnector(kHiveConnectorId)) {
-      connector::unregisterConnector(kHiveConnectorId);
+    if (connector::ConnectorRegistry::tryGet(kHiveConnectorId)) {
+      connector::ConnectorRegistry::global().erase(kHiveConnectorId);
     }
 
     // Re-register with CuDF properties.
@@ -98,7 +99,8 @@ void CudfTpcdsBenchmark::initialize() {
     cudf_velox::connector::hive::CudfHiveConnectorFactory cudfHiveFactory;
     auto cudfHiveConnector = cudfHiveFactory.newConnector(
         kHiveConnectorId, properties, ioExecutor_.get());
-    connector::registerConnector(cudfHiveConnector);
+    connector::ConnectorRegistry::global().insert(
+        cudfHiveConnector->connectorId(), cudfHiveConnector);
   }
 
   cudf_velox::CudfConfig::getInstance().memoryResource =

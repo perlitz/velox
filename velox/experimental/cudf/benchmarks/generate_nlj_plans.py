@@ -50,9 +50,15 @@ def next_id():
 # ---------------------------------------------------------------------------
 
 
+_TYPE_NAME_OVERRIDES = {
+    "DATE": "DateType",
+}
+
+
 def make_type(velox_type):
-    """Velox scalar type: INTEGER, BIGINT, DOUBLE, VARCHAR, BOOLEAN."""
-    return {"name": "Type", "type": velox_type}
+    """Velox scalar type: INTEGER, BIGINT, DOUBLE, VARCHAR, BOOLEAN, DATE."""
+    name = _TYPE_NAME_OVERRIDES.get(velox_type, "Type")
+    return {"name": name, "type": velox_type}
 
 
 def make_row_type(names, types):
@@ -63,6 +69,233 @@ def make_row_type(names, types):
         "names": list(names),
         "type": "ROW",
     }
+
+
+# ---------------------------------------------------------------------------
+# Full TPC-DS table schemas (from SF1 parquet files).
+# dataColumns in TableScanNode must list ALL columns in the table, not just the
+# columns being read, because the parquet reader uses ordinal position mapping.
+# ---------------------------------------------------------------------------
+
+TABLE_SCHEMAS = {
+    "store_sales": [
+        ("ss_sold_date_sk", "INTEGER"),
+        ("ss_sold_time_sk", "INTEGER"),
+        ("ss_item_sk", "INTEGER"),
+        ("ss_customer_sk", "INTEGER"),
+        ("ss_cdemo_sk", "INTEGER"),
+        ("ss_hdemo_sk", "INTEGER"),
+        ("ss_addr_sk", "INTEGER"),
+        ("ss_store_sk", "INTEGER"),
+        ("ss_promo_sk", "INTEGER"),
+        ("ss_ticket_number", "INTEGER"),
+        ("ss_quantity", "INTEGER"),
+        ("ss_wholesale_cost", "DOUBLE"),
+        ("ss_list_price", "DOUBLE"),
+        ("ss_sales_price", "DOUBLE"),
+        ("ss_ext_discount_amt", "DOUBLE"),
+        ("ss_ext_sales_price", "DOUBLE"),
+        ("ss_ext_wholesale_cost", "DOUBLE"),
+        ("ss_ext_list_price", "DOUBLE"),
+        ("ss_ext_tax", "DOUBLE"),
+        ("ss_coupon_amt", "DOUBLE"),
+        ("ss_net_paid", "DOUBLE"),
+        ("ss_net_paid_inc_tax", "DOUBLE"),
+        ("ss_net_profit", "DOUBLE"),
+    ],
+    "item": [
+        ("i_item_sk", "INTEGER"),
+        ("i_item_id", "VARCHAR"),
+        ("i_rec_start_date", "DATE"),
+        ("i_rec_end_date", "DATE"),
+        ("i_item_desc", "VARCHAR"),
+        ("i_current_price", "DOUBLE"),
+        ("i_wholesale_cost", "DOUBLE"),
+        ("i_brand_id", "INTEGER"),
+        ("i_brand", "VARCHAR"),
+        ("i_class_id", "INTEGER"),
+        ("i_class", "VARCHAR"),
+        ("i_category_id", "INTEGER"),
+        ("i_category", "VARCHAR"),
+        ("i_manufact_id", "INTEGER"),
+        ("i_manufact", "VARCHAR"),
+        ("i_size", "VARCHAR"),
+        ("i_formulation", "VARCHAR"),
+        ("i_color", "VARCHAR"),
+        ("i_units", "VARCHAR"),
+        ("i_container", "VARCHAR"),
+        ("i_manager_id", "INTEGER"),
+        ("i_product_name", "VARCHAR"),
+    ],
+    "date_dim": [
+        ("d_date_sk", "INTEGER"),
+        ("d_date_id", "VARCHAR"),
+        ("d_date", "DATE"),
+        ("d_month_seq", "INTEGER"),
+        ("d_week_seq", "INTEGER"),
+        ("d_quarter_seq", "INTEGER"),
+        ("d_year", "INTEGER"),
+        ("d_dow", "INTEGER"),
+        ("d_moy", "INTEGER"),
+        ("d_dom", "INTEGER"),
+        ("d_qoy", "INTEGER"),
+        ("d_fy_year", "INTEGER"),
+        ("d_fy_quarter_seq", "INTEGER"),
+        ("d_fy_week_seq", "INTEGER"),
+        ("d_day_name", "VARCHAR"),
+        ("d_quarter_name", "VARCHAR"),
+        ("d_holiday", "VARCHAR"),
+        ("d_weekend", "VARCHAR"),
+        ("d_following_holiday", "VARCHAR"),
+        ("d_first_dom", "INTEGER"),
+        ("d_last_dom", "INTEGER"),
+        ("d_same_day_ly", "INTEGER"),
+        ("d_same_day_lq", "INTEGER"),
+        ("d_current_day", "VARCHAR"),
+        ("d_current_week", "VARCHAR"),
+        ("d_current_month", "VARCHAR"),
+        ("d_current_quarter", "VARCHAR"),
+        ("d_current_year", "VARCHAR"),
+    ],
+    "catalog_sales": [
+        ("cs_sold_date_sk", "INTEGER"),
+        ("cs_sold_time_sk", "INTEGER"),
+        ("cs_ship_date_sk", "INTEGER"),
+        ("cs_bill_customer_sk", "INTEGER"),
+        ("cs_bill_cdemo_sk", "INTEGER"),
+        ("cs_bill_hdemo_sk", "INTEGER"),
+        ("cs_bill_addr_sk", "INTEGER"),
+        ("cs_ship_customer_sk", "INTEGER"),
+        ("cs_ship_cdemo_sk", "INTEGER"),
+        ("cs_ship_hdemo_sk", "INTEGER"),
+        ("cs_ship_addr_sk", "INTEGER"),
+        ("cs_call_center_sk", "INTEGER"),
+        ("cs_catalog_page_sk", "INTEGER"),
+        ("cs_ship_mode_sk", "INTEGER"),
+        ("cs_warehouse_sk", "INTEGER"),
+        ("cs_item_sk", "INTEGER"),
+        ("cs_promo_sk", "INTEGER"),
+        ("cs_order_number", "INTEGER"),
+        ("cs_quantity", "INTEGER"),
+        ("cs_wholesale_cost", "DOUBLE"),
+        ("cs_list_price", "DOUBLE"),
+        ("cs_sales_price", "DOUBLE"),
+        ("cs_ext_discount_amt", "DOUBLE"),
+        ("cs_ext_sales_price", "DOUBLE"),
+        ("cs_ext_wholesale_cost", "DOUBLE"),
+        ("cs_ext_list_price", "DOUBLE"),
+        ("cs_ext_tax", "DOUBLE"),
+        ("cs_coupon_amt", "DOUBLE"),
+        ("cs_ext_ship_cost", "DOUBLE"),
+        ("cs_net_paid", "DOUBLE"),
+        ("cs_net_paid_inc_tax", "DOUBLE"),
+        ("cs_net_paid_inc_ship", "DOUBLE"),
+        ("cs_net_paid_inc_ship_tax", "DOUBLE"),
+        ("cs_net_profit", "DOUBLE"),
+    ],
+    "store": [
+        ("s_store_sk", "INTEGER"),
+        ("s_store_id", "VARCHAR"),
+        ("s_rec_start_date", "DATE"),
+        ("s_rec_end_date", "DATE"),
+        ("s_closed_date_sk", "INTEGER"),
+        ("s_store_name", "VARCHAR"),
+        ("s_number_employees", "INTEGER"),
+        ("s_floor_space", "INTEGER"),
+        ("s_hours", "VARCHAR"),
+        ("s_manager", "VARCHAR"),
+        ("s_market_id", "INTEGER"),
+        ("s_geography_class", "VARCHAR"),
+        ("s_market_desc", "VARCHAR"),
+        ("s_market_manager", "VARCHAR"),
+        ("s_division_id", "INTEGER"),
+        ("s_division_name", "VARCHAR"),
+        ("s_company_id", "INTEGER"),
+        ("s_company_name", "VARCHAR"),
+        ("s_street_number", "VARCHAR"),
+        ("s_street_name", "VARCHAR"),
+        ("s_street_type", "VARCHAR"),
+        ("s_suite_number", "VARCHAR"),
+        ("s_city", "VARCHAR"),
+        ("s_county", "VARCHAR"),
+        ("s_state", "VARCHAR"),
+        ("s_zip", "VARCHAR"),
+        ("s_country", "VARCHAR"),
+        ("s_gmt_offset", "DOUBLE"),
+        ("s_tax_percentage", "DOUBLE"),
+    ],
+    "customer": [
+        ("c_customer_sk", "INTEGER"),
+        ("c_customer_id", "VARCHAR"),
+        ("c_current_cdemo_sk", "INTEGER"),
+        ("c_current_hdemo_sk", "INTEGER"),
+        ("c_current_addr_sk", "INTEGER"),
+        ("c_first_shipto_date_sk", "INTEGER"),
+        ("c_first_sales_date_sk", "INTEGER"),
+        ("c_salutation", "VARCHAR"),
+        ("c_first_name", "VARCHAR"),
+        ("c_last_name", "VARCHAR"),
+        ("c_preferred_cust_flag", "VARCHAR"),
+        ("c_birth_day", "INTEGER"),
+        ("c_birth_month", "INTEGER"),
+        ("c_birth_year", "INTEGER"),
+        ("c_birth_country", "VARCHAR"),
+        ("c_login", "VARCHAR"),
+        ("c_email_address", "VARCHAR"),
+        ("c_last_review_date_sk", "INTEGER"),
+    ],
+    "customer_address": [
+        ("ca_address_sk", "INTEGER"),
+        ("ca_address_id", "VARCHAR"),
+        ("ca_street_number", "VARCHAR"),
+        ("ca_street_name", "VARCHAR"),
+        ("ca_street_type", "VARCHAR"),
+        ("ca_suite_number", "VARCHAR"),
+        ("ca_city", "VARCHAR"),
+        ("ca_county", "VARCHAR"),
+        ("ca_state", "VARCHAR"),
+        ("ca_zip", "VARCHAR"),
+        ("ca_country", "VARCHAR"),
+        ("ca_gmt_offset", "DOUBLE"),
+        ("ca_location_type", "VARCHAR"),
+    ],
+    "web_sales": [
+        ("ws_sold_date_sk", "INTEGER"),
+        ("ws_sold_time_sk", "INTEGER"),
+        ("ws_ship_date_sk", "INTEGER"),
+        ("ws_item_sk", "INTEGER"),
+        ("ws_bill_customer_sk", "INTEGER"),
+        ("ws_bill_cdemo_sk", "INTEGER"),
+        ("ws_bill_hdemo_sk", "INTEGER"),
+        ("ws_bill_addr_sk", "INTEGER"),
+        ("ws_ship_customer_sk", "INTEGER"),
+        ("ws_ship_cdemo_sk", "INTEGER"),
+        ("ws_ship_hdemo_sk", "INTEGER"),
+        ("ws_ship_addr_sk", "INTEGER"),
+        ("ws_web_page_sk", "INTEGER"),
+        ("ws_web_site_sk", "INTEGER"),
+        ("ws_ship_mode_sk", "INTEGER"),
+        ("ws_warehouse_sk", "INTEGER"),
+        ("ws_promo_sk", "INTEGER"),
+        ("ws_order_number", "INTEGER"),
+        ("ws_quantity", "INTEGER"),
+        ("ws_wholesale_cost", "DOUBLE"),
+        ("ws_list_price", "DOUBLE"),
+        ("ws_sales_price", "DOUBLE"),
+        ("ws_ext_discount_amt", "DOUBLE"),
+        ("ws_ext_sales_price", "DOUBLE"),
+        ("ws_ext_wholesale_cost", "DOUBLE"),
+        ("ws_ext_list_price", "DOUBLE"),
+        ("ws_ext_tax", "DOUBLE"),
+        ("ws_coupon_amt", "DOUBLE"),
+        ("ws_ext_ship_cost", "DOUBLE"),
+        ("ws_net_paid", "DOUBLE"),
+        ("ws_net_paid_inc_tax", "DOUBLE"),
+        ("ws_net_paid_inc_ship", "DOUBLE"),
+        ("ws_net_paid_inc_ship_tax", "DOUBLE"),
+        ("ws_net_profit", "DOUBLE"),
+    ],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -99,8 +332,16 @@ def make_call(func_name, inputs, return_type):
 
 
 def make_and(left, right):
-    """AND two boolean expressions."""
-    return make_call("and", [left, right], "BOOLEAN")
+    """AND two boolean expressions.
+
+    AND/OR are special forms in Velox, not regular presto.default. functions.
+    """
+    return {
+        "functionName": "and",
+        "inputs": [left, right],
+        "name": "CallTypedExpr",
+        "type": make_type("BOOLEAN"),
+    }
 
 
 def make_between(value, low, high):
@@ -155,8 +396,6 @@ def make_table_scan(table_name, columns, num_rows=0):
     assignments = []
     output_names = []
     output_types = []
-    data_col_names = []
-    data_col_types = []
 
     for alias, hive_name, vtype in columns:
         assignments.append(
@@ -164,9 +403,12 @@ def make_table_scan(table_name, columns, num_rows=0):
         )
         output_names.append(alias)
         output_types.append(vtype)
-        if hive_name not in data_col_names:
-            data_col_names.append(hive_name)
-            data_col_types.append(vtype)
+
+    # dataColumns must be the full table schema so the parquet reader can
+    # map columns by ordinal position correctly.
+    schema = TABLE_SCHEMAS[table_name]
+    data_col_names = [name for name, _ in schema]
+    data_col_types = [vtype for _, vtype in schema]
 
     return {
         "assignments": assignments,
@@ -225,6 +467,7 @@ def make_local_partition_gather(source):
     return {
         "id": outer_id,
         "name": "LocalPartitionNode",
+        "type": "GATHER",
         "partitionFunctionSpec": {"name": "GatherPartitionFunctionSpec"},
         "scaleWriter": False,
         "sources": [project],
