@@ -17,6 +17,8 @@
 #pragma once
 
 #include "velox/experimental/cudf/exec/NvtxHelper.h"
+#include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
+#include "velox/experimental/cudf/expression/PrecomputeInstruction.h"
 #include "velox/experimental/cudf/vector/CudfVector.h"
 
 #include "velox/core/PlanNode.h"
@@ -35,7 +37,6 @@
 namespace facebook::velox::cudf_velox {
 
 class CudaEvent;
-class CudfExpression;
 
 /// Coordinates data transfer from build to probe operators for nested loop
 /// join. Build operators accumulate batches, then one operator transfers them
@@ -45,8 +46,11 @@ class CudfExpression;
 /// Thread-safety: All methods use mutex locking for concurrent access.
 class CudfNestedLoopJoinBridge : public exec::JoinBridge {
  public:
-  // Build data: concatenated build-side tables.
-  using build_data_type = std::vector<std::shared_ptr<cudf::table>>;
+  // Build data: single concatenated build-side table. NLJ requires a single
+  // table because the cross-join output is probe_rows × build_rows — batching
+  // the build side does not prevent output overflow, so we enforce a single
+  // table and fail early if the build side exceeds cudf::size_type limits.
+  using build_data_type = std::shared_ptr<cudf::table>;
 
   void setData(std::optional<build_data_type> data);
 
@@ -117,15 +121,15 @@ class CudfNestedLoopJoinBuild : public exec::Operator, public NvtxHelper {
 ///   actual data using indices.
 ///
 /// Mismatch handling (left/right joins):
-///   Build data is processed in batches, so we cannot use per-batch left/right
-///   join APIs (a row unmatched in one batch may match a later batch). Instead,
-///   we always use conditional_inner_join per-batch and track mismatches via
-///   GPU-side BOOL8 flag columns:
-///   - Left join: probeMatchedFlags_ tracks probe mismatches per probe batch.
-///     After all build batches, unmatched probe rows are emitted with null
-///     build columns.
+///   We cannot use per-probe left/right join APIs (a probe row unmatched
+///   against the build may still match in another probe batch). Instead, we
+///   always use conditional_inner_join and track mismatches via GPU-side BOOL8
+///   flag columns:
+///   - Left join: probeMatchedFlags_ tracks probe mismatches for the current
+///     probe batch. After the build is exhausted, unmatched probe rows are
+///     emitted with null build columns.
 ///   - Right join: buildMatchedFlags_ tracks build mismatches across all probe
-///     batches. After all probes finish, the last driver (via allPeersFinished)
+///     inputs. After all probes finish, the last driver (via allPeersFinished)
 ///     merges flags from all peers and emits unmatched build rows with null
 ///     probe columns.
 ///
@@ -173,14 +177,13 @@ class CudfNestedLoopJoinProbe : public exec::Operator, public NvtxHelper {
   }
 
  private:
-  /// Performs inner join between a single probe batch and a single build
-  /// batch. Uses cross_join for unfiltered joins and conditional_inner_join
-  /// for filtered joins. Updates probeMatchedFlags_ for left/full joins and
-  /// buildMatchedFlags_ for right/full joins.
+  /// Joins a single probe batch against the build table. Uses cross_join for
+  /// unfiltered joins and conditional_inner_join for filtered joins. Updates
+  /// probeMatchedFlags_ for left/full joins and buildMatchedFlags_ for
+  /// right/full joins.
   std::unique_ptr<cudf::table> joinWithBuildBatch(
       cudf::table_view probeTableView,
       cudf::table_view buildView,
-      size_t buildBatchIndex,
       rmm::cuda_stream_view stream);
 
   /// Emits probe rows that had no match across all build batches, with null
@@ -215,6 +218,11 @@ class CudfNestedLoopJoinProbe : public exec::Operator, public NvtxHelper {
   bool hasFilter_{false};
   cudf::ast::tree tree_;
   std::vector<std::unique_ptr<cudf::scalar>> scalars_;
+  // Precompute instructions for expressions not directly representable in cuDF
+  // AST. These sub-expressions are evaluated into extra columns appended to
+  // each table view before it is passed to cuDF join APIs.
+  std::vector<PrecomputeInstruction> leftPrecomputeInstructions_;
+  std::vector<PrecomputeInstruction> rightPrecomputeInstructions_;
 
   // Output column mapping resolved by name from the output type.
   // Handles arbitrary column ordering (e.g., {"b0", "p0"}).
@@ -227,9 +235,6 @@ class CudfNestedLoopJoinProbe : public exec::Operator, public NvtxHelper {
   RowTypePtr probeType_;
   RowTypePtr buildType_;
 
-  // Index into build tables for the current probe input.
-  size_t buildBatchIdx_{0};
-
   bool finished_{false};
 
   // Probe mismatch tracking for left/full joins: BOOL8 column, one element
@@ -240,10 +245,18 @@ class CudfNestedLoopJoinProbe : public exec::Operator, public NvtxHelper {
   // True when build side has no rows.
   bool buildEmpty_{false};
 
-  // Build mismatch tracking for right/full joins: BOOL8 column per build
-  // batch. Updated across all probe inputs via BITWISE_OR. Merged from peers
-  // in noMoreInput() before the last driver emits unmatched build rows.
-  std::vector<std::unique_ptr<cudf::column>> buildMatchedFlags_;
+  // Cached precomputed columns for the build table (populated once in
+  // isBlocked() when rightPrecomputeInstructions_ is non-empty). Kept alive
+  // alongside buildExtendedView_ which holds non-owning views into them.
+  std::vector<ColumnOrView> buildPrecomputed_;
+  // Extended build table view: original build columns + precomputed columns.
+  // Valid only when buildPrecomputed_ is non-empty.
+  cudf::table_view buildExtendedView_{};
+
+  // Build mismatch tracking for right/full joins: BOOL8 column, one element
+  // per build row. Updated across all probe inputs via BITWISE_OR. Merged from
+  // peers in noMoreInput() before the last driver emits unmatched build rows.
+  std::unique_ptr<cudf::column> buildMatchedFlags_;
 
   // Multi-driver coordination for right/full join build mismatch emission.
   bool isLastDriver_{false};
