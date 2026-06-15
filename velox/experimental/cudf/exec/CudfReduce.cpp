@@ -583,10 +583,26 @@ bool canReduceBeEvaluatedByCudf(
       return false;
     }
 
-    // `mask` is NOT supported (in testing do not appear to be be applied and
-    // return incorrect results )
     if (aggregate.mask) {
-      return false;
+      const auto companionStep =
+          getCompanionStep(aggregate.call->name(), step);
+      // Masks only apply to raw rows.
+      if (!exec::isRawInput(companionStep)) {
+        return false;
+      }
+      // Mask must be a plain boolean column reference (it is projected via
+      // inputRowSchema->getChildIdx(mask->name())).
+      if (aggregate.mask->type()->kind() != TypeKind::BOOLEAN ||
+          aggregate.mask->kind() != core::ExprKind::kFieldAccess) {
+        return false;
+      }
+      // Masked avg/stddev are excluded in this PR (partial-struct null TODO).
+      const auto originalName = getOriginalName(aggregate.call->name());
+      const auto prefix = CudfConfig::getInstance().functionNamePrefix;
+      if (originalName.rfind(prefix + "avg", 0) == 0 ||
+          originalName.rfind(prefix + "stddev", 0) == 0) {
+        return false;
+      }
     }
 
     if (isCountFunctionName(aggregate.call->name())) {
