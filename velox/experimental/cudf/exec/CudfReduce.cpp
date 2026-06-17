@@ -121,19 +121,10 @@ struct ReduceCountAggregator : ReduceAggregator {
           break;
         case CountInputKind::kCountAll:
           if (maskIndex.has_value()) {
-            // count(*) FILTER(WHERE m): count mask-true rows. Build a column
-            // valid exactly where m is true, then count valid entries.
-            auto trueScalar =
-                cudf::numeric_scalar<bool>(true, true, stream, get_temp_mr());
-            auto nullScalar = cudf::make_default_constructed_scalar(
-                cudf::data_type{cudf::type_id::BOOL8}, stream, get_temp_mr());
-            nullScalar->set_valid_async(false, stream);
-            auto injectedMask = cudf::copy_if_else(
-                trueScalar,
-                *nullScalar,
-                input.column(*maskIndex),
-                stream,
-                get_temp_mr());
+            // count(*) FILTER(WHERE m): count mask-true rows via a
+            // validity-only column.
+            auto injectedMask = cudf_velox::maskToValidityColumn(
+                input.column(*maskIndex), stream, get_temp_mr());
             count = injectedMask->size() - injectedMask->null_count();
           } else {
             count = input.num_columns() > 0 ? input.num_rows() : inputRowCount;
@@ -203,6 +194,7 @@ struct ReduceMeanAggregator : ReduceAggregator {
       TypePtr const& outputType,
       rmm::cuda_stream_view stream,
       vector_size_t /*inputRowCount*/) override {
+    VELOX_CHECK(!maskIndex.has_value(), "avg does not support masks");
     switch (step) {
       case core::AggregationNode::Step::kSingle: {
         auto const aggRequest =
@@ -325,6 +317,8 @@ struct ApproxDistinctAggregator : ReduceAggregator {
       TypePtr const& outputType,
       rmm::cuda_stream_view stream,
       vector_size_t /*inputRowCount*/) override {
+    VELOX_CHECK(
+        !maskIndex.has_value(), "approx_distinct does not support masks");
     if (exec::isRawInput(step)) {
       return doPartialReduce(input, stream);
     } else if (step == core::AggregationNode::Step::kIntermediate) {
@@ -596,11 +590,18 @@ bool canReduceBeEvaluatedByCudf(
           aggregate.mask->kind() != core::ExprKind::kFieldAccess) {
         return false;
       }
-      // Masked avg/stddev are excluded in this PR (partial-struct null TODO).
+      // Only sum/count/min/max honor masks; every other aggregate (avg,
+      // stddev, approx_distinct, ...) ignores maskIndex and would silently
+      // produce an unmasked result, so fall back to CPU.
+      // TODO: Support masked avg/stddev (needs partial-struct null handling).
       const auto originalName = getOriginalName(aggregate.call->name());
       const auto prefix = CudfConfig::getInstance().functionNamePrefix;
-      if (originalName.rfind(prefix + "avg", 0) == 0 ||
-          originalName.rfind(prefix + "stddev", 0) == 0) {
+      const bool maskSupported =
+          originalName.rfind(prefix + "sum", 0) == 0 ||
+          originalName.rfind(prefix + "count", 0) == 0 ||
+          originalName.rfind(prefix + "min", 0) == 0 ||
+          originalName.rfind(prefix + "max", 0) == 0;
+      if (!maskSupported) {
         return false;
       }
     }

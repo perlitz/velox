@@ -26,6 +26,7 @@
 #include "velox/expression/SignatureBinder.h"
 
 #include <cudf/copying.hpp>
+#include <cudf/scalar/scalar.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 
 #include <algorithm>
@@ -137,6 +138,20 @@ std::unique_ptr<cudf::column> applyMask(
       cudf::make_default_constructed_scalar(values.type(), stream, mr);
   nullScalar->set_valid_async(false, stream);
   return cudf::copy_if_else(values, *nullScalar, mask, stream, mr);
+}
+
+std::unique_ptr<cudf::column> maskToValidityColumn(
+    cudf::column_view mask,
+    rmm::cuda_stream_view stream,
+    rmm::device_async_resource_ref mr) {
+  // copy_if_else(trueScalar, nullScalar, mask): out valid iff mask.valid(i) &&
+  // mask[i]. Explicit true/null scalars make the intent clear (validity, not
+  // value), and COUNT_VALID over the result counts the mask-true rows.
+  auto trueScalar = cudf::numeric_scalar<bool>(true, true, stream, mr);
+  auto nullScalar = cudf::make_default_constructed_scalar(
+      cudf::data_type{cudf::type_id::BOOL8}, stream, mr);
+  nullScalar->set_valid_async(false, stream);
+  return cudf::copy_if_else(trueScalar, *nullScalar, mask, stream, mr);
 }
 
 std::vector<ResolvedAggregateInfo> resolveAggregateInfos(

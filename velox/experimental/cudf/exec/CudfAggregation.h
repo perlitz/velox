@@ -90,6 +90,15 @@ std::unique_ptr<cudf::column> applyMask(
     rmm::cuda_stream_view stream,
     rmm::device_async_resource_ref mr);
 
+// Returns a BOOL8 column whose validity is exactly "mask is true": a true entry
+// is valid, a false or null entry is null. Counting valid entries (COUNT_VALID)
+// over the result yields the number of mask-true rows, used for masked
+// count(*)/count(const).
+std::unique_ptr<cudf::column> maskToValidityColumn(
+    cudf::column_view mask,
+    rmm::cuda_stream_view stream,
+    rmm::device_async_resource_ref mr);
+
 // Result of buildAggregationInputChannels: a channel permutation that places
 // grouping keys first, followed by aggregate input columns in aggregate order,
 // then one mask channel per masked raw-input aggregate; plus per-aggregate

@@ -740,6 +740,33 @@ TEST_F(CudfAggregationSelectionTest, maskedNonBooleanRejected) {
   ASSERT_FALSE(canBeEvaluatedByCudf(*masked, queryCtx_.get()));
 }
 
+// Masked approx_distinct falls back: it is reduce-only and ignores the mask,
+// so the allowlist gate (sum/count/min/max only) must reject it.
+TEST_F(CudfAggregationSelectionTest, maskedApproxDistinctRejected) {
+  auto plan = PlanBuilder()
+                  .values({makeRowVector({
+                      makeFlatVector<int64_t>({1, 2, 3}),
+                      makeFlatVector<int64_t>({10, 20, 30}),
+                      makeFlatVector<bool>({true, false, true}),
+                  })})
+                  .aggregation(
+                      {},
+                      {"approx_distinct(c1)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      false)
+                  .planNode();
+  auto node = std::dynamic_pointer_cast<const core::AggregationNode>(plan);
+  // Unmasked approx_distinct is supported on the cuDF reduce path.
+  ASSERT_TRUE(canBeEvaluatedByCudf(*node, queryCtx_.get()));
+  auto aggs = node->aggregates();
+  aggs[0].mask = std::make_shared<core::FieldAccessTypedExpr>(BOOLEAN(), "c2");
+  auto masked = core::AggregationNode::Builder(*node)
+                    .aggregates(std::move(aggs))
+                    .build();
+  ASSERT_FALSE(canBeEvaluatedByCudf(*masked, queryCtx_.get()));
+}
+
 // Test return type validation
 // DISABLED: This test demonstrates expected failure modes when return type
 // matching is enabled.
