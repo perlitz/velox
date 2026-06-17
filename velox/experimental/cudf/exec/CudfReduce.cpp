@@ -47,50 +47,49 @@ using facebook::velox::cudf_velox::get_temp_mr;
 using facebook::velox::cudf_velox::ReduceAggregator;
 using facebook::velox::cudf_velox::ResolvedAggregateInfo;
 
-#define DEFINE_SIMPLE_REDUCE_AGGREGATOR(Name, name)                    \
-  struct Reduce##Name##Aggregator : ReduceAggregator {                 \
-    Reduce##Name##Aggregator(                                          \
-        core::AggregationNode::Step step,                              \
-        uint32_t inputIndex,                                           \
-        VectorPtr constant,                                            \
-        const TypePtr& resultType,                                     \
-        std::optional<uint32_t> maskIndex)                             \
-        : ReduceAggregator(                                            \
-              step,                                                    \
-              inputIndex,                                              \
-              constant,                                                \
-              resultType,                                              \
-              maskIndex) {}                                            \
-                                                                       \
-    std::unique_ptr<cudf::column> doReduce(                            \
-        cudf::table_view const& input,                                 \
-        TypePtr const& outputType,                                     \
-        rmm::cuda_stream_view stream,                                  \
-        vector_size_t /*inputRowCount*/) override {                    \
-      auto const aggRequest =                                          \
-          cudf::make_##name##_aggregation<cudf::reduce_aggregation>(); \
-      auto const cudfOutputType =                                      \
-          cudf::data_type(cudf_velox::veloxToCudfTypeId(outputType));  \
-      /* Mask only applies at raw input, where maskIndex is set; the   \
-         injected column owns the lifetime through cudf::reduce. cudf  \
-         reduce(SUM/MIN/MAX) over an all-null group yields a null      \
-         scalar -> NULL, matching Velox all-excluded semantics. */     \
-      std::unique_ptr<cudf::column> injected;                          \
-      if (maskIndex.has_value()) {                                     \
-        injected = cudf_velox::applyMask(                              \
-            input.column(inputIndex),                                  \
-            input.column(*maskIndex),                                  \
-            stream,                                                    \
-            get_temp_mr());                                            \
-      }                                                                \
-      auto const reduceInput =                                         \
-          injected ? injected->view() : input.column(inputIndex);      \
-      auto const resultScalar = cudf::reduce(                          \
-          reduceInput, *aggRequest, cudfOutputType, stream,            \
-          get_temp_mr());                                              \
-      return cudf::make_column_from_scalar(                            \
-          *resultScalar, 1, stream, get_output_mr());                  \
-    }                                                                  \
+#define DEFINE_SIMPLE_REDUCE_AGGREGATOR(Name, name)                         \
+  struct Reduce##Name##Aggregator : ReduceAggregator {                      \
+    Reduce##Name##Aggregator(                                               \
+        core::AggregationNode::Step step,                                   \
+        uint32_t inputIndex,                                                \
+        VectorPtr constant,                                                 \
+        const TypePtr& resultType,                                          \
+        std::optional<uint32_t> maskIndex)                                  \
+        : ReduceAggregator(                                                 \
+              step,                                                         \
+              inputIndex,                                                   \
+              constant,                                                     \
+              resultType,                                                   \
+              maskIndex) {}                                                 \
+                                                                            \
+    std::unique_ptr<cudf::column> doReduce(                                 \
+        cudf::table_view const& input,                                      \
+        TypePtr const& outputType,                                          \
+        rmm::cuda_stream_view stream,                                       \
+        vector_size_t /*inputRowCount*/) override {                         \
+      auto const aggRequest =                                               \
+          cudf::make_##name##_aggregation<cudf::reduce_aggregation>();      \
+      auto const cudfOutputType =                                           \
+          cudf::data_type(cudf_velox::veloxToCudfTypeId(outputType));       \
+      /* Mask only applies at raw input, where maskIndex is set; the        \
+         injected column owns the lifetime through cudf::reduce. cudf       \
+         reduce(SUM/MIN/MAX) over an all-null group yields a null           \
+         scalar -> NULL, matching Velox all-excluded semantics. */          \
+      std::unique_ptr<cudf::column> injected;                               \
+      if (maskIndex.has_value()) {                                          \
+        injected = cudf_velox::applyMask(                                   \
+            input.column(inputIndex),                                       \
+            input.column(*maskIndex),                                       \
+            stream,                                                         \
+            get_temp_mr());                                                 \
+      }                                                                     \
+      auto const reduceInput =                                              \
+          injected ? injected->view() : input.column(inputIndex);           \
+      auto const resultScalar = cudf::reduce(                               \
+          reduceInput, *aggRequest, cudfOutputType, stream, get_temp_mr()); \
+      return cudf::make_column_from_scalar(                                 \
+          *resultScalar, 1, stream, get_output_mr());                       \
+    }                                                                       \
   };
 
 DEFINE_SIMPLE_REDUCE_AGGREGATOR(Sum, sum)
@@ -578,8 +577,7 @@ bool canReduceBeEvaluatedByCudf(
     }
 
     if (aggregate.mask) {
-      const auto companionStep =
-          getCompanionStep(aggregate.call->name(), step);
+      const auto companionStep = getCompanionStep(aggregate.call->name(), step);
       // Masks only apply to raw rows.
       if (!exec::isRawInput(companionStep)) {
         return false;
@@ -596,8 +594,7 @@ bool canReduceBeEvaluatedByCudf(
       // TODO: Support masked avg/stddev (needs partial-struct null handling).
       const auto originalName = getOriginalName(aggregate.call->name());
       const auto prefix = CudfConfig::getInstance().functionNamePrefix;
-      const bool maskSupported =
-          originalName.rfind(prefix + "sum", 0) == 0 ||
+      const bool maskSupported = originalName.rfind(prefix + "sum", 0) == 0 ||
           originalName.rfind(prefix + "count", 0) == 0 ||
           originalName.rfind(prefix + "min", 0) == 0 ||
           originalName.rfind(prefix + "max", 0) == 0;

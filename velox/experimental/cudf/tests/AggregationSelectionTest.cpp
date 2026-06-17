@@ -687,9 +687,8 @@ TEST_F(CudfAggregationSelectionTest, maskedSumAccepted) {
   auto node = std::dynamic_pointer_cast<const core::AggregationNode>(plan);
   auto aggs = node->aggregates();
   aggs[0].mask = std::make_shared<core::FieldAccessTypedExpr>(BOOLEAN(), "c2");
-  auto masked = core::AggregationNode::Builder(*node)
-                    .aggregates(std::move(aggs))
-                    .build();
+  auto masked =
+      core::AggregationNode::Builder(*node).aggregates(std::move(aggs)).build();
   ASSERT_TRUE(canBeEvaluatedByCudf(*masked, queryCtx_.get()));
 }
 
@@ -711,9 +710,8 @@ TEST_F(CudfAggregationSelectionTest, maskedAvgRejected) {
   auto node = std::dynamic_pointer_cast<const core::AggregationNode>(plan);
   auto aggs = node->aggregates();
   aggs[0].mask = std::make_shared<core::FieldAccessTypedExpr>(BOOLEAN(), "c2");
-  auto masked = core::AggregationNode::Builder(*node)
-                    .aggregates(std::move(aggs))
-                    .build();
+  auto masked =
+      core::AggregationNode::Builder(*node).aggregates(std::move(aggs)).build();
   ASSERT_FALSE(canBeEvaluatedByCudf(*masked, queryCtx_.get()));
 }
 
@@ -734,9 +732,8 @@ TEST_F(CudfAggregationSelectionTest, maskedNonBooleanRejected) {
   auto node = std::dynamic_pointer_cast<const core::AggregationNode>(plan);
   auto aggs = node->aggregates();
   aggs[0].mask = std::make_shared<core::FieldAccessTypedExpr>(BIGINT(), "c1");
-  auto masked = core::AggregationNode::Builder(*node)
-                    .aggregates(std::move(aggs))
-                    .build();
+  auto masked =
+      core::AggregationNode::Builder(*node).aggregates(std::move(aggs)).build();
   ASSERT_FALSE(canBeEvaluatedByCudf(*masked, queryCtx_.get()));
 }
 
@@ -761,9 +758,8 @@ TEST_F(CudfAggregationSelectionTest, maskedApproxDistinctRejected) {
   ASSERT_TRUE(canBeEvaluatedByCudf(*node, queryCtx_.get()));
   auto aggs = node->aggregates();
   aggs[0].mask = std::make_shared<core::FieldAccessTypedExpr>(BOOLEAN(), "c2");
-  auto masked = core::AggregationNode::Builder(*node)
-                    .aggregates(std::move(aggs))
-                    .build();
+  auto masked =
+      core::AggregationNode::Builder(*node).aggregates(std::move(aggs)).build();
   ASSERT_FALSE(canBeEvaluatedByCudf(*masked, queryCtx_.get()));
 }
 

@@ -1750,8 +1750,7 @@ TEST_F(AggregationTest, maskedCountStar) {
                   .singleAggregation({"k"}, {"count(1)"}, {"m"})
                   .planNode();
   AssertQueryBuilder(plan, duckDbQueryRunner_)
-      .assertResults(
-          "SELECT k, count(*) FILTER (WHERE m) FROM tmp GROUP BY k");
+      .assertResults("SELECT k, count(*) FILTER (WHERE m) FROM tmp GROUP BY k");
 }
 
 // Fully-masked-out group -> sum NULL, count 0.
